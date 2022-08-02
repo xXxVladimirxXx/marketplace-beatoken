@@ -83,6 +83,14 @@ fn marketplace_place_for_sale<S: HasStateApi>(
 ) -> ContractResult<()> {
     let param: PlaceForSaleParameter = ctx.parameter_cursor().get()?;
 
+    let sender = ctx.sender();
+    let owner = ctx.owner();
+
+    ensure!(
+        sender.matches_account(&owner),
+        MarketplaceError::Unauthorized.into()
+    );
+
     let state = host.state_mut();
     state.tokens_for_sale.insert(param.token_id, param.price);
     Ok(())
@@ -119,6 +127,40 @@ fn marketplace_view_list_for_sale<S: HasStateApi>(
 
     Ok(view_state)
 }
+
+#[derive(SchemaType, Serialize)]
+struct GetListedParameter {
+    token_ids: Vec<TokenId>,
+}
+
+#[receive(
+    contract = "MarketplaceBeatoken",
+    name = "get_listed_for_sale",
+    parameter = "GetListedParameter",
+    return_value = "ViewState"
+)]
+fn marketplace_get_listed_for_sale<S: HasStateApi>(
+    ctx: &impl HasReceiveContext,
+    host: &impl HasHost<State<S>, StateApiType = S>,
+) -> ContractResult<ViewState> {
+    let param: GetListedParameter = ctx.parameter_cursor().get()?;
+
+    let mut view_state = ViewState { tokens: Vec::new() };
+    let state = host.state();
+
+    for id in param.token_ids {
+        if let Some(amount) = state.tokens_for_sale.get(&id) {
+            view_state.tokens.push(ViewStateToken {
+                id, 
+                price: *amount,
+            });
+        }
+    }
+
+    Ok(view_state)
+}
+
+
 
 #[derive(SchemaType, Serialize)]
 struct WithdrawParameter {
@@ -182,8 +224,8 @@ fn marketplace_purchase<S: HasStateApi>(
         MarketplaceError::Unauthorized.into()
     );
 
-    let state = host.state();
-    let token = state.tokens_for_sale.get(&purchase.token_id);
+    let state = host.state_mut();
+    let token = state.tokens_for_sale.remove_and_get(&purchase.token_id);
     ensure!(token.is_some(), MarketplaceError::TokenNotFound.into());
 
     let transfer = Transfer::<TokenId, TokenPrice> {
@@ -203,9 +245,6 @@ fn marketplace_purchase<S: HasStateApi>(
         Amount::zero(),
     )?;
 
-    let state = host.state_mut();
-    state.tokens_for_sale.remove(&purchase.token_id);
-
     Ok(())
 }
 
@@ -223,6 +262,8 @@ mod tests {
 
     const TOKEN1_ID: TokenId = TokenIdU32(1);
     const TOKEN1_PRICE: TokenPrice = TokenAmountU32(1000);
+
+    const TOKEN2_ID: TokenId = TokenIdU32(2);
 
     #[concordium_test]
     fn test_init() {
@@ -329,6 +370,29 @@ mod tests {
 
         let view = result.expect_report("View list for sale results in rejection.");
         claim_eq!(view.tokens, vec![ViewStateToken{ id: TOKEN1_ID, price: TOKEN1_PRICE}], "Results should contain TOKEN1.");
+    }
+
+
+    #[concordium_test]
+    fn test_get_listed_for_sale() {
+        let mut ctx = TestReceiveContext::empty();
+
+        let mut state_builder = TestStateBuilder::new();
+        let mut host = TestHost::new(State::empty(&mut state_builder), state_builder);
+
+        host.state_mut().tokens_for_sale.insert(TOKEN1_ID, TOKEN1_PRICE);
+        
+        let param = GetListedParameter{
+            token_ids: vec![TOKEN1_ID, TOKEN2_ID],
+        };
+
+        let param_bytes = to_bytes(&param);
+        ctx.set_parameter(&param_bytes);
+
+        let result = marketplace_get_listed_for_sale(&ctx, &host);
+
+        let view = result.expect_report("Get listed for sale results in rejection.");
+        claim_eq!(view.tokens, vec![ViewStateToken{ id: TOKEN1_ID, price: TOKEN1_PRICE}], "Results should contain only TOKEN1.");
     }
 }
 
